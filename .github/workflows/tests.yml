@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Zero-dependency suite: no npm install needed.
+      - name: Run headless test suite
+        run: tests/run.sh node
+
+      - name: Verify standalone build is in sync with src/
+        run: |
+          python3 - <<'EOF'
+          html = open('src/index.html').read()
+          css  = open('src/style.css').read()
+          js   = open('src/game.js').read()
+          out = html.replace('<link rel="stylesheet" href="style.css">',
+                             '<style>\n' + css + '</style>')
+          out = out.replace('<script src="game.js"></script>',
+                            '<script>\n' + js + '</script>')
+          current = open('dino-game.html').read()
+          if out != current:
+              raise SystemExit(
+                  "dino-game.html is out of sync with src/ — regenerate it "
+                  "(see AGENTS.md §2) and commit both."
+              )
+          print("standalone build in sync ✓")
+          EOF

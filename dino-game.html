@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Chrome Dino</title>
+<style>
+
+  :root {
+    --bg: #f7f7f7;
+    --ink: #535353;
+    --ink-soft: #999;
+    --line: #535353;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    font-family: "Courier New", ui-monospace, monospace;
+    overflow: hidden;
+    touch-action: manipulation;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #stage {
+    position: relative;
+    width: min(900px, 100vw);
+    height: 300px;
+  }
+  /* fullscreen: fill the whole screen */
+  #stage:fullscreen {
+    width: 100vw;
+    height: 100vh;
+  }
+  #stage:-webkit-full-screen {
+    width: 100vw;
+    height: 100vh;
+  }
+  @media (max-width: 700px) {
+    #stage { height: min(66vw, 70vh); }
+    #hint { font-size: 10px; bottom: 6px; }
+  }
+  /* respect notches / home bars */
+  #stage:fullscreen #autoBtn { top: calc(12px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left)); }
+  #stage:fullscreen #fsBtn   { top: calc(12px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+  }
+  #autoBtn {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    font-family: "Courier New", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--ink-soft);
+    background: transparent;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    padding: 4px 8px;
+    cursor: pointer;
+    user-select: none;
+    z-index: 2;
+  }
+  #autoBtn.on { color: #2e7d32; border-color: #2e7d32; }
+  #autoBtn:hover { opacity: 0.8; }
+  #fsBtn {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    font-family: "Courier New", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--ink-soft);
+    background: transparent;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    padding: 4px 8px;
+    cursor: pointer;
+    user-select: none;
+    z-index: 2;
+  }
+  #fsBtn:hover { opacity: 0.8; }
+  #hint {
+    position: absolute;
+    left: 0; right: 0;
+    bottom: 8px;
+    text-align: center;
+    color: var(--ink-soft);
+    font-size: 12px;
+    letter-spacing: 1px;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="game" width="900" height="300"></canvas>
+    <button id="autoBtn" type="button">AUTO RUN: OFF</button>
+    <button id="fsBtn" type="button">⛶ FULLSCREEN</button>
+    <div id="hint">SPACE/tap to start &amp; jump · ↓/swipe-down to duck · A auto-run · F fullscreen</div>
+  </div>
+
+<script>
+
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  // ---- World dimensions (logical; canvas is scaled by CSS) ----
+  // Canvas internal resolution tracks the on-screen stage size (crisp on mobile
+  // and fullscreen), with a device-pixel-ratio cap for perf.
+  const stage = document.getElementById("stage");
+  function resizeCanvas() {
+    const rect = stage.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(320, Math.round(rect.width * dpr));
+    canvas.height = Math.max(160, Math.round(rect.height * dpr));
+  }
+  resizeCanvas();
+  window.addEventListener("resize", resizeCanvas);
+
+  let W = canvas.width;
+  let H = canvas.height;
+  let GROUND_Y = H - 40;             // top edge of the ground strip
+  // keep W/H/ground fresh after every resize
+  const refreshDims = () => {
+    W = canvas.width; H = canvas.height; GROUND_Y = H - 40;
+    if (typeof buildStars === "function") buildStars();
+  };
+  window.addEventListener("resize", refreshDims);
+  let INK = "#535353";               // the classic Chrome dino gray
+  let INK_SOFT = "#999";
+
+  // ---- Clouds ----
+  const CLOUDS = [
+    { x: 150, y: 60,  s: 1 },
+    { x: 420, y: 38,  s: 0.8 },
+    { x: 680, y: 72,  s: 1.1 },
+    { x: 860, y: 48,  s: 0.7 },
+  ];
+  const CLOUD_SPEED = 2;             // px per frame, slow ambient drift
+
+  function drawCloud(x, y, s) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    ctx.fillStyle = PAL.cloud;
+    // Puffy cloud made of a few rounded blobs (Chrome style)
+    ctx.beginPath();
+    ctx.arc(0, 0, 10, Math.PI * 0.5, Math.PI * 1.5);
+    ctx.arc(12, -6, 12, Math.PI, Math.PI * 1.9);
+    ctx.arc(28, -4, 10, Math.PI * 1.2, Math.PI * 2.2);
+    ctx.arc(40, 0, 9, Math.PI * 1.5, Math.PI * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    // flat bottom
+    ctx.fillRect(-10, 0, 60, 6);
+    ctx.restore();
+  }
+
+  // ---- Game speed (step 3) ----
+  const BASE_SPEED = 6;              // starting world speed (px/frame)
+  const MAX_SPEED = 13;              // speed cap
+  let SPEED = BASE_SPEED;
+  let speedTimer = 0;
+  function updateSpeed() {
+    // ramp up every 10s, like Chrome's gradual acceleration
+    if (++speedTimer >= 600) {
+      speedTimer = 0;
+      if (SPEED < MAX_SPEED) SPEED = Math.min(MAX_SPEED, SPEED + 0.5);
+    }
+  }
+
+  // ---- Ground: a textured line with little notches (like the real game) ----
+  let groundOffset = 0;
+
+  function drawGround() {
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2;
+
+    // Main ground line
+    ctx.beginPath();
+    ctx.moveTo(0, GROUND_Y);
+    ctx.lineTo(W, GROUND_Y);
+    ctx.stroke();
+
+    // Scrolling texture notches (softer tone)
+    ctx.strokeStyle = PAL.soft;
+    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = 1;
+    const gap = 48;
+    let start = -(groundOffset % gap);
+    for (let x = start; x < W + gap; x += gap) {
+      // a couple of random-looking ticks (deterministic per tile index)
+      const idx = Math.round((x + groundOffset) / gap);
+      const n1 = (idx * 73) % 20;
+      const n2 = (idx * 131) % 24;
+      ctx.beginPath();
+      ctx.moveTo(x + n1, GROUND_Y + 8);
+      ctx.lineTo(x + n1 + 8, GROUND_Y + 8);
+      ctx.moveTo(x + n2, GROUND_Y + 18);
+      ctx.lineTo(x + n2 + 5, GROUND_Y + 18);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- DINO (step 2 + step 3: jump) ----
+  const DINO_X = 50;    // fixed horizontal position
+  const DINO = {
+    pose: "stand",      // stand | run | duck
+    frame: 0, tick: 0,  // leg animation state
+    y: 0,               // height above ground (px)
+    vel: 0,
+  };
+  const GRAVITY = 0.6;      // px per frame²
+  const JUMP_VEL = 11;      // initial upward velocity (px per frame)
+
+  const keys = {};
+  let gameStarted = false;   // world frozen until first jump (like Chrome)
+  function refreshPose() {
+    if (DINO.y > 0) return;                 // airborne: keep last ground pose
+    DINO.pose = (keys["down"]) ? "duck" : "run";
+  }
+  function jump() {
+    if (GAME.over) { restart(); return; }   // space after crash restarts
+    if (!gameStarted) {                     // first input starts the run
+      gameStarted = true;
+      DINO.pose = "run";
+    }
+    if (DINO.y === 0 && !keys["down"]) {
+      DINO.vel = JUMP_VEL;
+      DINO.pose = "run";
+    }
+  }
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+      e.preventDefault();
+      keys.up = true;
+      jump();
+    } else if (e.code === "ArrowDown" || e.code === "KeyS") {
+      e.preventDefault();
+      keys.down = true;
+      refreshPose();
+    }
+  });
+  window.addEventListener("keyup", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") keys.up = false;
+    if (e.code === "ArrowDown" || e.code === "KeyS") {
+      keys.down = false;
+      refreshPose();
+    }
+  });
+  // ---- TOUCH: tap = jump, swipe down = duck (hold), release = stand ----
+  let touchStartY = null;
+  const SWIPE_PX = 24;
+  window.addEventListener("pointerdown", (e) => {
+    if (e.target && e.target.closest && e.target.closest("button")) return;  // buttons untouched
+    touchStartY = e.clientY;
+    jump();
+  });
+  window.addEventListener("pointermove", (e) => {
+    if (touchStartY === null) return;
+    if (e.clientY - touchStartY > SWIPE_PX) {      // downward swipe -> duck
+      keys.down = true; refreshPose();
+      touchStartY = e.clientY;                     // allow re-trigger on further drag
+    }
+  });
+  const endTouch = () => {
+    touchStartY = null;
+    keys.down = false; refreshPose();
+  };
+  window.addEventListener("pointerup", endTouch);
+  window.addEventListener("pointercancel", endTouch);
+
+  // ---- SPRITES (official Chrome offline-sprite, 1x, embedded) ----
+  const SHEET_W = 1233, SHEET_H = 68;
+  const SHEET = new Image();
+  SHEET.onload = () => { try { buildTintMasks(); } catch (e) {} };
+  SHEET.src = "data:image/png;base64,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";
+
+  // source rects in the sheet: [sx, sy, sw, sh]
+  const SPR = {
+    // Chromium TREX strip starts at x=848; frame offsets: jump=0, run=88/132, crash=220,
+    // duck=264/323 (duck art sits lower in the sheet, y=19).
+    dinoStand: [848, 2, 44, 47],    // also the jumping frame (Chrome reuses it)
+    dinoBlink: [892, 2, 44, 47],    // waiting frame with eye closed
+    dinoRun1:  [936, 2, 44, 47],    // left foot down, right leg lifted
+    dinoRun2:  [980, 2, 44, 47],    // left leg lifted, right foot down
+    dinoCrash: [1068, 2, 44, 47],   // wide-eyed crashed face
+    dinoDuck1: [1112, 19, 59, 30],
+    dinoDuck2: [1171, 19, 59, 30],
+    cactusS:   [332, 2, 17, 35],   // one small stem; groups stitch at 17px pitch
+    cactusL:   [382, 2, 25, 47],   // one large stem; groups stitch at 25px pitch
+    ptero1:    [134, 2, 46, 40],
+    ptero2:    [182, 2, 44, 30],
+  };
+
+  function poseKey() {
+    if (GAME.over) return "dinoCrash";
+    if (DINO.y > 0) return "dinoStand";          // jump reuses the standing frame
+    if (DINO.pose === "stand") {
+      // idle waiting: blink for ~12 frames every ~4 seconds
+      return (frameCount % 240 < 12) ? "dinoBlink" : "dinoStand";
+    }
+    if (DINO.pose === "duck") return DINO.frame ? "dinoDuck2" : "dinoDuck1";
+    return DINO.frame ? "dinoRun2" : "dinoRun1";
+  }
+
+  function drawDino() {
+    if (!SHEET.complete || !SHEET.naturalWidth) return;
+    const key = poseKey();
+    const [sx, sy, sw, sh] = SPR[key];
+    const dy = key === "dinoCrash" ? 2 : 0;      // crash art ends 2px above cell bottom
+    drawDinoShadow();
+    const nightAmt = pw(NIGHT_KEYS, skyPhase());
+    if (nightAmt > 0.4 && !GAME.over) {          // soft moonlight halo at night
+      ctx.save();
+      ctx.shadowColor = "rgba(160,180,255," + (0.5*nightAmt).toFixed(2) + ")";
+      ctx.shadowBlur = 14;
+      drawSprite(sx, sy, sw, sh, DINO_X, GROUND_Y - DINO.y - sh + dy, sw, sh, PAL.ink);
+      ctx.restore();
+    } else {
+      drawSprite(sx, sy, sw, sh, DINO_X, GROUND_Y - DINO.y - sh + dy, sw, sh, PAL.ink);
+    }
+  }
+
+  function updateDino() {
+    // Jump physics (only when airborne)
+    if (DINO.y > 0 || DINO.vel > 0) {
+      DINO.y += DINO.vel;
+      DINO.vel -= GRAVITY;
+      if (DINO.y <= 0) { DINO.y = 0; DINO.vel = 0; refreshPose(); }
+    }
+    // Leg animation on the ground. Chrome: run ~12 changes/s (5f @60fps),
+    // duck ~8 changes/s (8f).
+    const every = DINO.pose === "duck" ? 8 : 5;
+    if (DINO.pose !== "stand" && ++DINO.tick >= every) {
+      DINO.tick = 0;
+      DINO.frame ^= 1;
+    }
+  }
+
+  // ---- OBSTACLES (step 4) ----
+  const obstacles = [];   // {x, y, w, h, spr, flying, frame}
+  let spawnGap = 0;       // frames until next spawn
+  let pteroTick = 0;      // ptero flap timer
+
+  function resetObstacles() {
+    obstacles.length = 0;
+    spawnGap = 90;
+  }
+
+  function spawnObstacle() {
+    const roll = Math.random();
+    if (roll < 0.12 && SPEED > BASE_SPEED + 1) {
+      // pterodactyl at one of 3 heights (low / mid / high)
+      const lane = [0, 1, 2][Math.floor(Math.random() * 3)];
+      const yOff = [10, 40, 70][lane];                 // px above ground
+      obstacles.push({
+        x: W + 10, y: GROUND_Y - yOff - 40, w: 46, h: 40,
+        spr: "ptero", flying: true, frame: 0,
+      });
+    } else if (roll < 0.55) {
+      // small cactus group 1-3 (stitched from single stems, 17px pitch)
+      const n = 1 + Math.floor(Math.random() * 3);
+      obstacles.push({
+        x: W + 10, y: GROUND_Y - 35, w: 17 * n, h: 35,
+        spr: "cactusS", stems: n, pitch: 17, flying: false, frame: 0,
+      });
+    } else {
+      // large cactus group 1-3 (stitched, 25px pitch)
+      const n = 1 + Math.floor(Math.random() * 3);
+      obstacles.push({
+        x: W + 10, y: GROUND_Y - 47, w: 25 * n, h: 47,
+        spr: "cactusL", stems: n, pitch: 25, flying: false, frame: 0,
+      });
+    }
+    // next spawn distance shrinks as speed rises (faster game = tighter gaps)
+    spawnGap = 45 + Math.random() * 45 + SPEED * 2;
+  }
+
+  function updateObstacles() {
+    if (--spawnGap <= 0) spawnObstacle();
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const o = obstacles[i];
+      o.x -= SPEED;
+      if (o.flying) {
+        o.x -= 1.5;                              // pteros fly a bit faster
+        if (++pteroTick >= 15) { pteroTick = 0; o.frame ^= 1; }
+      }
+      if (o.x + o.w < -10) obstacles.splice(i, 1);
+    }
+  }
+
+  function drawObstacles() {
+    if (!SHEET.complete || !SHEET.naturalWidth) return;
+    const nightAmt = pw(NIGHT_KEYS, skyPhase());
+    for (const o of obstacles) {
+      if (o.flying) {
+        const r = o.frame ? SPR.ptero2 : SPR.ptero1;
+        // wings-down frame is shorter: keep the body aligned to the box bottom
+        const dy = o.h - r[3];
+        drawSprite(r[0], r[1], r[2], r[3], Math.round(o.x), Math.round(o.y + dy), r[2], r[3], PAL.ink);
+      } else {
+        const r = SPR[o.spr];
+        for (let k = 0; k < (o.stems || 1); k++) {
+          drawSprite(r[0], r[1], r[2], r[3],
+                     Math.round(o.x) + k * (o.pitch || r[2]),
+                     Math.round(o.y), r[2], r[3], PAL.ink);
+        }
+      }
+      if (nightAmt > 0.5 && o.flying) {          // faint moonlit rim on pteros
+        ctx.globalAlpha = 0.25*nightAmt;
+        ctx.fillStyle = "#b9c8ff";
+        ctx.fillRect(o.x, o.y + o.h - 2, o.w, 2);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  // dino hitbox (slightly inset so it feels fair, like Chrome's)
+  function dinoBox() {
+    const ducking = DINO.pose === "duck" && DINO.y === 0;
+    const w = ducking ? 54 : 32;
+    const h = ducking ? 26 : 46;
+    const x = DINO_X + 6;
+    const y = GROUND_Y - DINO.y - h;
+    return { x, y, w, h };
+  }
+
+  function hit(o, b) {
+    return o.x < b.x + b.w && o.x + o.w > b.x &&
+           o.y < b.y + b.h && o.y + o.h > b.y;
+  }
+
+  function checkCollision() {
+    const b = dinoBox();
+    for (const o of obstacles) {
+      // inset obstacle box a little too
+      const ob = { x: o.x + 2, y: o.y + 2, w: o.w - 4, h: o.h - 4 };
+      if (hit(ob, b)) { gameOver(); return; }
+    }
+  }
+
+  // ---- ATMOSPHERE: living sky, parallax ridges, particles ----
+  const CYCLE = 1200;                     // points per full day/night cycle
+
+  const PAL_DAY   = { skyTop:"#7ec8e3", skyBot:"#eaf6fb", far:"#cfe3ec", near:"#a9c7d5",
+                      ink:"#454545", hi:"#f4f4f4", soft:"#8a9aa5", cloud:"#ffffff",
+                      sunCore:"#fff3c4", dust:[122,112,102] };
+  const PAL_SET   = { skyTop:"#4a4e8f", skyBot:"#ff9d76", far:"#7a6a95", near:"#564a70",
+                      ink:"#3f3a52", hi:"#ffd9c2", soft:"#8a7f9a", cloud:"#ffd9c2",
+                      sunCore:"#ffb26b", dust:[150,120,110] };
+  const PAL_NIGHT = { skyTop:"#0a0f24", skyBot:"#1b2547", far:"#232c4e", near:"#151d38",
+                      ink:"#e8ecf4", hi:"#20242e", soft:"#93a0bd", cloud:"#39456e",
+                      sunCore:"#fff3c4", dust:[185,195,225] };
+  const PAL_DAWN  = { skyTop:"#3a4a7f", skyBot:"#ffc09a", far:"#8a7a9f", near:"#63577f",
+                      ink:"#46425c", hi:"#ffe3d0", soft:"#948aa0", cloud:"#ffe3d0",
+                      sunCore:"#ffd9a0", dust:[160,130,120] };
+
+  const hex = (h) => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+  const mixHex = (a, b, t) => {
+    const A = hex(a), B = hex(b);
+    return "#" + A.map((v,i) => Math.round(v+(B[i]-v)*t).toString(16).padStart(2,"0")).join("");
+  };
+  const mixRGB = (a, b, t) => a.map((v,i) => Math.round(v+(b[i]-v)*t));
+
+  const PAL_KEYS = [[0,PAL_DAY],[0.38,PAL_DAY],[0.48,PAL_SET],[0.53,PAL_NIGHT],
+                    [0.88,PAL_NIGHT],[0.93,PAL_DAWN],[1,PAL_DAY]];
+  const NIGHT_KEYS = [[0,0],[0.48,0],[0.53,1],[0.88,1],[0.93,0],[1,0]];
+
+  function pw(keys, ph) {                 // piecewise-linear lookup
+    for (let i = 1; i < keys.length; i++) {
+      if (ph <= keys[i][0]) {
+        const [t0,v0] = keys[i-1], [t1,v1] = keys[i];
+        return v0 + (v1 - v0) * ((ph - t0) / ((t1 - t0) || 1));
+      }
+    }
+    return keys[keys.length-1][1];
+  }
+
+  let PAL = PAL_DAY;
+  function paletteAt(ph) {
+    for (let i = 1; i < PAL_KEYS.length; i++) {
+      if (ph <= PAL_KEYS[i][0]) {
+        const [t0,a] = PAL_KEYS[i-1], [t1,b] = PAL_KEYS[i];
+        const t = (ph - t0) / ((t1 - t0) || 1);
+        const out = {};
+        for (const k of ["skyTop","skyBot","far","near","ink","hi","soft","cloud","sunCore"])
+          out[k] = mixHex(a[k], b[k], t);
+        out.dust = mixRGB(a.dust, b.dust, t);
+        return out;
+      }
+    }
+    return PAL_DAY;
+  }
+
+  const skyPhase = () => (GAME.score % CYCLE) / CYCLE;
+
+  // seeded PRNG so the scenery is stable across frames
+  function mulberry(seed) {
+    return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  }
+  const rng0 = mulberry(20260421);
+  let STARS = [];
+  function buildStars() {
+    const r = mulberry(20260421);   // same seed -> stable layout
+    STARS = Array.from({ length: 46 }, () => ({
+      x: r()*W, y: 8 + r()*(GROUND_Y*0.6), r: 0.6 + r()*1.1, tw: r()*Math.PI*2 }));
+  }
+  buildStars();
+
+  // tileable parallax ridges
+  function genRidge(seed, step, amp, base) {
+    const r = mulberry(seed);
+    const n = Math.ceil(1700 / step) + 1;
+    const ys = [];
+    for (let i = 0; i < n; i++) ys.push(base - r()*amp);
+    ys[n-1] = ys[0];                      // seamless wrap
+    return { step, ys };
+  }
+  const RIDGE_FAR  = genRidge(11, 90, 55, 205);
+  const RIDGE_NEAR = genRidge(77, 64, 42, 232);
+  let farOff = 0, nearOff = 0;
+
+  function drawRidge(R, offset, color) {
+    const tile = (R.ys.length - 1) * R.step;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(-tile, GROUND_Y);
+    for (let k = -1; k <= 1; k++)
+      for (let i = 0; i < R.ys.length; i++)
+        ctx.lineTo(i*R.step - (offset % tile) + k*tile, R.ys[i]);
+    ctx.lineTo(W + tile, GROUND_Y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // sun by day, crescent moon by night, both arcing across the sky
+  function drawSunMoon(ph) {
+    if (ph < 0.5) {
+      const p = ph / 0.5;
+      const x = W*0.85 - W*0.72*p;
+      const y = 46 + 78*Math.sin(Math.PI*p);
+      const warm = Math.max(0, Math.min(1, (ph-0.36)/0.14));   // reddens toward dusk
+      const g = ctx.createRadialGradient(x, y, 4, x, y, 70);
+      g.addColorStop(0, "rgba(255,214,140,0.55)");
+      g.addColorStop(1, "rgba(255,214,140,0)");
+      ctx.fillStyle = g;
+      ctx.fillRect(x-70, y-70, 140, 140);
+      ctx.fillStyle = mixHex("#fff3c4", "#ff9d5c", warm);
+      ctx.beginPath(); ctx.arc(x, y, 15, 0, Math.PI*2); ctx.fill();
+    } else {
+      const p = (ph - 0.5) / 0.5;
+      const x = W*0.85 - W*0.72*p;
+      const y = 42 + 70*Math.sin(Math.PI*p);
+      const g = ctx.createRadialGradient(x, y, 4, x, y, 60);
+      g.addColorStop(0, "rgba(190,205,255,0.30)");
+      g.addColorStop(1, "rgba(190,205,255,0)");
+      ctx.fillStyle = g;
+      ctx.fillRect(x-60, y-60, 120, 120);
+      ctx.fillStyle = "#eef2ff";
+      ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = PAL.skyTop;         // bite out a crescent
+      ctx.beginPath(); ctx.arc(x+5, y-3, 11, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  // dust kicked up by feet + speed streaks
+  const dust = [], streaks = [];
+  function spawnDust(n, x, y, pow) {
+    for (let i = 0; i < n; i++) {
+      dust.push({ x: x + (Math.random()-0.5)*8, y: y - Math.random()*4,
+        vx: -SPEED*0.25 - Math.random()*1.5, vy: -Math.random()*pow,
+        life: 26 + Math.random()*14, max: 40, r: 1.2 + Math.random()*2 });
+    }
+  }
+  function updateParticles() {
+    for (let i = dust.length-1; i >= 0; i--) {
+      const d = dust[i];
+      d.x += d.vx; d.y += d.vy; d.vy += 0.12; d.life--;
+      if (d.life <= 0 || d.y > GROUND_Y+6) dust.splice(i,1);
+    }
+    if (SPEED > 9 && frameCount % 5 === 0) {
+      streaks.push({ x: W+20, y: 16 + Math.random()*(GROUND_Y-40),
+        len: 26 + Math.random()*46, v: SPEED*2.1, a: 0.10 + Math.random()*0.14 });
+    }
+    for (let i = streaks.length-1; i >= 0; i--) {
+      const st = streaks[i];
+      st.x -= st.v;
+      if (st.x + st.len < 0) streaks.splice(i,1);
+    }
+  }
+  function drawParticles() {
+    for (const d of dust) {
+      ctx.globalAlpha = Math.max(0, d.life/d.max)*0.55;
+      ctx.fillStyle = "rgb(" + PAL.dust[0] + "," + PAL.dust[1] + "," + PAL.dust[2] + ")";
+      ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = PAL.soft;
+    ctx.lineWidth = 1.5;
+    for (const st of streaks) {
+      ctx.globalAlpha = st.a;
+      ctx.beginPath(); ctx.moveTo(st.x, st.y); ctx.lineTo(st.x+st.len, st.y); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // dino drop shadow (shrinks with jump height)
+  function drawDinoShadow() {
+    const air = Math.min(1, DINO.y/110);
+    ctx.globalAlpha = 0.18*(1-air);
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.ellipse(DINO_X+22, GROUND_Y+5, 24*(1-air*0.5), 4, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Two-tone sprite tinting.
+  // The sheet encodes body ink as gray 83 and highlights/eye as gray 247.
+  // We pre-split the sheet ONCE into two alpha masks (body / highlight),
+  // then tint each mask with the palette colors every frame.
+  const bodyCv = document.createElement("canvas");
+  const hiCv = document.createElement("canvas");
+  bodyCv.width = hiCv.width = SHEET_W;
+  bodyCv.height = hiCv.height = SHEET_H;
+  const bctx = bodyCv.getContext("2d");
+  const hctx = hiCv.getContext("2d");
+
+  function buildTintMasks() {
+    // draw sheet, read pixels, split by tone
+    bctx.drawImage(SHEET, 0, 0);
+    const img = bctx.getImageData(0, 0, SHEET_W, SHEET_H);
+    const d = img.data;
+    const body = bctx.createImageData(SHEET_W, SHEET_H);
+    const hi = hctx.createImageData(SHEET_W, SHEET_H);
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i+3];
+      if (a > 128) {
+        const light = d[i] > 160;          // 247 -> highlight, 83 -> body
+        (light ? hi : body).data[i+3] = 255;
+      }
+    }
+    bctx.putImageData(body, 0, 0);
+    hctx.putImageData(hi, 0, 0);
+  }
+
+  // Each layer is tinted in its OWN buffer (source-in is isolated there),
+  // then both are composited onto the screen with source-over.
+  // Layer order: body first, highlights ON TOP (eye stays visible).
+  const layCv = document.createElement("canvas");   // scratch for one layer
+  layCv.width = SHEET_W; layCv.height = SHEET_H;
+  const lctx = layCv.getContext("2d");
+
+  function tintLayer(maskCv, sx, sy, sw, sh, dx, dy, dw, dh, color) {
+    lctx.globalCompositeOperation = "source-over";
+    lctx.clearRect(0, 0, SHEET_W, SHEET_H);
+    lctx.drawImage(maskCv, 0, 0);                    // full mask into scratch
+    lctx.globalCompositeOperation = "source-in";
+    lctx.fillStyle = color;
+    lctx.fillRect(0, 0, SHEET_W, SHEET_H);           // recolor whole scratch
+    ctx.drawImage(layCv, sx, sy, sw, sh, dx, dy, dw, dh);  // blit just the sprite cell
+  }
+
+  function drawSprite(sx, sy, sw, sh, dx, dy, dw, dh, color, hiColor) {
+    dx = Math.round(dx); dy = Math.round(dy);
+    tintLayer(bodyCv, sx, sy, sw, sh, dx, dy, dw, dh, color);
+    tintLayer(hiCv,   sx, sy, sw, sh, dx, dy, dw, dh, hiColor || PAL.hi);
+  }
+
+  let prevDinoY = 0;
+  function updateAtmosphere() {
+    const ph = skyPhase();
+    PAL = paletteAt(ph);
+    INK = PAL.ink; INK_SOFT = PAL.soft;
+    document.body.style.background = PAL.skyBot;
+    farOff += SPEED*0.12; nearOff += SPEED*0.28;
+    for (const st of STARS) { st.x -= SPEED*0.02; if (st.x < -4) st.x = W+4; }
+    if (gameStarted && !GAME.over && DINO.y === 0 && frameCount % 3 === 0) {
+      spawnDust(1, DINO_X+8, GROUND_Y, 1.6);            // running dust
+    }
+    if (prevDinoY > 0 && DINO.y === 0) spawnDust(10, DINO_X+20, GROUND_Y, 2.6);  // landing puff
+    prevDinoY = DINO.y;
+    updateParticles();
+  }
+
+  function drawSky() {
+    const ph = skyPhase();
+    const g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+    g.addColorStop(0, PAL.skyTop);
+    g.addColorStop(1, PAL.skyBot);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, GROUND_Y);
+    const nightAmt = pw(NIGHT_KEYS, ph);
+    if (nightAmt > 0.01) {
+      for (const st of STARS) {
+        ctx.globalAlpha = nightAmt * (0.35 + 0.65*Math.abs(Math.sin(frameCount*0.04 + st.tw)));
+        ctx.fillStyle = "#dfe8ff";
+        ctx.beginPath(); ctx.arc(st.x, st.y, st.r, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+    drawSunMoon(ph);
+    drawRidge(RIDGE_FAR, farOff, PAL.far);
+    drawRidge(RIDGE_NEAR, nearOff, PAL.near);
+  }
+
+  function drawVignette() {
+    const nightAmt = pw(NIGHT_KEYS, skyPhase());
+    const v = ctx.createRadialGradient(W/2, H/2, H*0.35, W/2, H/2, W*0.62);
+    v.addColorStop(0, "rgba(0,0,0,0)");
+    v.addColorStop(1, "rgba(0,0,0," + (0.06 + 0.16*nightAmt).toFixed(3) + ")");
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---- Game state ----
+  const GAME = { over: false, score: 0, hi: 0, flash: 0, night: false };
+  try { GAME.hi = parseInt(localStorage.getItem("dinoHi") || "0", 10) || 0; }
+  catch (e) { /* localStorage unavailable */ }
+
+  // Chrome scores ~10 points/sec; we tick score with distance travelled.
+  function updateScore() {
+    const prev = GAME.score;
+    GAME.score += SPEED / 36;   // ~10 pts/sec at base speed, like Chrome
+    // milestone flash every 100
+
+    if (GAME.flash === 0 && Math.floor(GAME.score / 100) > Math.floor(prev / 100)) {
+      GAME.flash = 30;
+    }
+    if (GAME.flash > 0) GAME.flash--;
+    // day/night flip every 500 pts
+    const wantNight = Math.floor(GAME.score / 500) % 2 === 1;
+    if (wantNight !== GAME.night) setNight(wantNight);
+  }
+
+  // day/night is now continuous via the atmosphere palette; kept for restart
+  function setNight(on) { GAME.night = on; }
+
+  function drawScore() {
+    const pad = (n) => String(Math.floor(n)).padStart(5, "0");
+    ctx.font = "bold 14px 'Courier New', monospace";
+    ctx.textAlign = "right";
+    // hide current score while it flashes at a milestone (Chrome behaviour)
+    const showScore = !(GAME.flash > 0 && Math.floor(GAME.flash / 6) % 2 === 0);
+    if (showScore) {
+      ctx.fillStyle = INK;
+      ctx.fillText(pad(GAME.score), W - 20, 26);
+    }
+    if (GAME.hi > 0) {
+      ctx.fillStyle = INK_SOFT;
+      ctx.fillText("HI " + pad(GAME.hi), W - 90, 26);
+    }
+    ctx.textAlign = "left";
+  }
+
+  let redFlash = 0;
+  let autoRestartIn = 0;                   // frame countdown for auto-restart
+  function gameOver() {
+    GAME.over = true;
+    if (AUTO.on) autoRestartIn = 55;       // ~0.9s pause, then run on
+    shake = 14;
+    redFlash = 12;
+    DINO.vel = 0;
+    if (GAME.score > GAME.hi) {
+      GAME.hi = Math.floor(GAME.score);
+      try { localStorage.setItem("dinoHi", String(GAME.hi)); } catch (e) {}
+    }
+  }
+  function restart() {
+    GAME.over = false;
+    GAME.score = 0; GAME.flash = 0;
+    if (GAME.night) setNight(false);
+    gameStarted = true;
+    DINO.y = 0; DINO.vel = 0; DINO.pose = "run"; DINO.frame = 0;
+    SPEED = BASE_SPEED; speedTimer = 0;
+    resetObstacles();
+  }
+
+  // ---- FULLSCREEN ----
+  const fsBtn = document.getElementById("fsBtn");
+  function toggleFullscreen() {
+    const stage = document.getElementById("stage");
+    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+      (stage.requestFullscreen || stage.webkitRequestFullscreen).call(stage).catch(() => {});
+    } else {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    }
+  }
+  fsBtn.addEventListener("click", toggleFullscreen);
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "KeyF") { e.preventDefault(); toggleFullscreen(); }
+  });
+
+  // ---- AUTOPILOT (auto-run) ----
+  const AUTO = { on: false, cool: 0 };
+  const autoBtn = document.getElementById("autoBtn");
+
+  function setAuto(on) {
+    AUTO.on = on;
+    autoBtn.classList.toggle("on", on);
+    autoBtn.textContent = "AUTO RUN: " + (on ? "ON" : "OFF");
+    if (on && !gameStarted) {           // flipping it on starts the run too
+      gameStarted = true;
+      DINO.pose = "run";
+    }
+  }
+  autoBtn.addEventListener("click", () => setAuto(!AUTO.on));
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "KeyA") { e.preventDefault(); setAuto(!AUTO.on); }
+  });
+
+  // The bot: look at the nearest obstacle ahead and act like a player would.
+  function updateAutopilot() {
+    if (!AUTO.on || GAME.over) return;
+    if (AUTO.cool > 0) { AUTO.cool--; return; }
+
+    // find the closest obstacle that has not passed the dino yet
+    const dinoFront = DINO_X + 30;                    // snout position
+    let target = null;
+    for (const o of obstacles) {
+      if (o.x + o.w >= dinoFront) { target = o; break; }
+    }
+    if (!target) { keys.down = false; refreshPose(); return; }
+
+    const dist = target.x - dinoFront;
+    const feetToClear = target.h;                     // jump must clear this
+    // reaction distance scales with speed so we jump neither too early nor late
+    const jumpDist = SPEED * 11 + feetToClear * 0.9;
+
+    if (target.flying) {
+      // high lane (top ~150): run under; mid (~180): duck; low (~210): jump
+      if (target.y < 165) {                           // overhead — do nothing
+        keys.down = false; refreshPose();
+      } else if (target.y < 195) {                    // mid — duck until passed
+        keys.down = true; refreshPose();
+      } else {                                        // low — treat like a cactus
+        keys.down = false;
+        if (dist < jumpDist && DINO.y === 0) { doJump(); }
+      }
+    } else {
+      // ground cactus: stop ducking, jump when in range
+      keys.down = false;
+      if (keys.down === false && DINO.pose === "duck") refreshPose();
+      if (dist < jumpDist && DINO.y === 0) { doJump(); }
+    }
+  }
+
+  // shared jump helper (autopilot uses the same physics as the player)
+  function doJump() {
+    DINO.vel = JUMP_VEL;
+    DINO.pose = "run";
+    AUTO.cool = 8;                                    // frames between decisions
+  }
+
+  // ---- Update ----
+  let shake = 0;
+  function update() {
+    if (GAME.over) {
+      if (shake > 0) shake *= 0.85;
+      updateParticles();
+      if (autoRestartIn > 0 && --autoRestartIn === 0 && AUTO.on) restart();
+      return;
+    }
+    if (!gameStarted) { PAL = paletteAt(0); updateParticles(); return; }
+    updateSpeed();
+    updateAtmosphere();
+    groundOffset = (groundOffset + SPEED) % (48 * 1000000); // keep bounded
+    for (const c of CLOUDS) {
+      c.x -= CLOUD_SPEED + SPEED * 0.1; // slight parallax
+      if (c.x < -70) {
+        c.x = W + 70;
+        c.y = 30 + Math.random() * 55;
+        c.s = 0.7 + Math.random() * 0.5;
+      }
+    }
+    updateDino();
+    updateObstacles();
+    updateAutopilot();
+    updateScore();
+    checkCollision();
+  }
+
+  function drawGameOver() {
+    ctx.fillStyle = INK;
+    ctx.font = "bold 22px 'Courier New', monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("G A M E   O V E R", W / 2, H / 2 - 20);
+    ctx.font = "14px 'Courier New', monospace";
+    ctx.fillStyle = INK_SOFT;
+    ctx.fillText("press SPACE to restart", W / 2, H / 2 + 10);
+    ctx.textAlign = "left";
+  }
+
+  // ---- Render ----
+  function render() {
+    ctx.save();
+    if (shake > 0.4) {
+      ctx.translate((Math.random()-0.5)*shake, (Math.random()-0.5)*shake*0.6);
+    }
+    drawSky();
+    for (const c of CLOUDS) drawCloud(c.x, c.y, c.s);
+    drawGround();
+    drawParticles();
+    drawObstacles();
+    drawDino();
+    drawScore();
+    if (redFlash > 0) {
+      redFlash--;
+      ctx.globalAlpha = redFlash/12 * 0.28;
+      ctx.fillStyle = "#ff2b2b";
+      ctx.fillRect(-20, -20, W+40, H+40);
+      ctx.globalAlpha = 1;
+    }
+    if (GAME.over) drawGameOver();
+    drawVignette();
+    ctx.restore();
+  }
+
+  // ---- Main loop (fixed ~60fps step) ----
+  let frameCount = 0;
+  function frame() {
+    frameCount++;
+    update();
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+
+// ---- [dev] screenshot driver: ?shot=night|auto|over&advance=N ----
+(() => {
+  if (typeof location === "undefined") return;   // not a browser (tests)
+  const q = new URLSearchParams(location.search);
+  const shot = q.get("shot");
+  if (!shot) return;
+  const advance = parseInt(q.get("advance") || "0", 10);
+  window.addEventListener("load", () => {
+    gameStarted = true; DINO.pose = "run";
+    if (shot === "auto") setAuto(true);
+    if (shot === "night") GAME.score = CYCLE * 0.65;   // deep night phase
+    if (shot === "over") { GAME.score = 300; gameOver(); }
+    for (let i = 0; i < advance; i++) update();
+  });
+})();
+})();
+</script>
+</body>
+</html>

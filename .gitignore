@@ -1,0 +1,26 @@
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node (tests need no deps, but just in case)
+node_modules/
+package-lock.json
+
+# Scratch / tooling not part of the submission
+/tmp/
+tools/node/
+*.tar.xz
+
+# Unrelated project sharing this folder (kept out of the dino-game submission)
+loop/
+
+# Local-only notes
+memories/
+MEMORY.md
